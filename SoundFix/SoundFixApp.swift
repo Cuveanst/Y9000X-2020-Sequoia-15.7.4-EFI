@@ -19,10 +19,8 @@ struct SoundFixApp: App {
         _offlineRepairManager = StateObject(wrappedValue: offlineRepairManager)
         _loginLaunchManager = StateObject(wrappedValue: loginLaunchManager)
 
-        loginLaunchManager.applyStoredPreference()
-
         DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
-            guard loginLaunchManager.runStartupRepair else { return }
+            guard loginLaunchManager.shouldRunStartupRepairNow() else { return }
 
             offlineRepairManager.refreshStatus()
             if offlineRepairManager.isInstalled {
@@ -31,6 +29,7 @@ struct SoundFixApp: App {
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                 audioManager.performMuteUnmuteCycle()
+                loginLaunchManager.markStartupRepairPerformedForCurrentBoot()
             }
         }
     }
@@ -57,15 +56,19 @@ struct SoundFixApp: App {
     }
 
     private var menuBarSymbolName: String {
-        if audioManager.isProcessing {
-            return "wrench.adjustable.fill"
+        if audioManager.isMuted || audioManager.volume <= 0.001 {
+            return "speaker.slash.fill"
         }
 
-        if timerManager.isRunning {
-            return "wrench.and.screwdriver.fill"
+        if audioManager.volume < 0.33 {
+            return "speaker.wave.1.fill"
         }
 
-        return "wrench.and.screwdriver"
+        if audioManager.volume < 0.66 {
+            return "speaker.wave.2.fill"
+        }
+
+        return "speaker.wave.3.fill"
     }
 }
 
@@ -711,44 +714,48 @@ struct SmallActionButton: View {
 @MainActor
 final class LoginLaunchManager: ObservableObject {
     @Published private(set) var launchAtLoginEnabled = false
-    @Published private(set) var runStartupRepair = true
+    @Published private(set) var runStartupRepair = false
     @Published private(set) var statusMessage = "SoundFix can launch automatically after you log in."
 
     private let defaults = UserDefaults.standard
-    private let launchAtLoginKey = "launchAtLoginEnabled"
     private let startupRepairKey = "startupRepairEnabled"
+    private let lastStartupRepairBootMarkerKey = "lastStartupRepairBootMarker"
 
     init() {
         if defaults.object(forKey: startupRepairKey) == nil {
-            defaults.set(true, forKey: startupRepairKey)
+            defaults.set(false, forKey: startupRepairKey)
         }
 
-        if defaults.object(forKey: launchAtLoginKey) == nil {
-            defaults.set(true, forKey: launchAtLoginKey)
-        }
-
-        runStartupRepair = defaults.bool(forKey: startupRepairKey)
         refreshStatus()
     }
 
-    func applyStoredPreference() {
-        setLaunchAtLoginEnabled(defaults.bool(forKey: launchAtLoginKey), persist: false)
+    func shouldRunStartupRepairNow() -> Bool {
+        guard launchAtLoginEnabled, runStartupRepair else { return false }
+        return defaults.string(forKey: lastStartupRepairBootMarkerKey) != currentBootMarker
+    }
+
+    func markStartupRepairPerformedForCurrentBoot() {
+        defaults.set(currentBootMarker, forKey: lastStartupRepairBootMarkerKey)
     }
 
     func refreshStatus() {
-        launchAtLoginEnabled = defaults.bool(forKey: launchAtLoginKey)
         runStartupRepair = defaults.bool(forKey: startupRepairKey)
 
         switch SMAppService.mainApp.status {
         case .enabled:
+            launchAtLoginEnabled = true
             statusMessage = "SoundFix is registered to launch after login."
         case .requiresApproval:
+            launchAtLoginEnabled = true
             statusMessage = "SoundFix is queued for launch at login, but macOS may still want approval in Login Items."
         case .notRegistered:
+            launchAtLoginEnabled = false
             statusMessage = "SoundFix is not registered to launch after login."
         case .notFound:
+            launchAtLoginEnabled = false
             statusMessage = "macOS could not find this app for launch-at-login registration."
         @unknown default:
+            launchAtLoginEnabled = false
             statusMessage = "SoundFix launch-at-login status could not be determined."
         }
     }
@@ -769,17 +776,17 @@ final class LoginLaunchManager: ObservableObject {
             } else {
                 try SMAppService.mainApp.unregister()
             }
-
-            if persist {
-                defaults.set(enabled, forKey: launchAtLoginKey)
-            }
         } catch {
             statusMessage = error.localizedDescription
-            if persist {
-                defaults.set(false, forKey: launchAtLoginKey)
+            if !persist {
+                launchAtLoginEnabled = false
             }
         }
 
         refreshStatus()
+    }
+
+    private var currentBootMarker: String {
+        String(Int(Date().timeIntervalSince1970 - ProcessInfo.processInfo.systemUptime))
     }
 }

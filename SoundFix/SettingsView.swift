@@ -31,7 +31,7 @@ struct SettingsView: View {
                 GroupBox("Startup") {
                     VStack(alignment: .leading, spacing: 12) {
                         Toggle("Launch SoundFix after login", isOn: launchAtLoginBinding)
-                        Toggle("Run Deep Fix restart and audio repair on app launch", isOn: startupRepairBinding)
+                        Toggle("Run Deep Fix restart and audio repair once per boot", isOn: startupRepairBinding)
 
                         Text(loginLaunchManager.statusMessage)
                             .font(.caption)

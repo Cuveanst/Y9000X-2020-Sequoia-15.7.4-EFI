@@ -141,15 +141,22 @@ class AudioManager: ObservableObject {
         guard force || Date().timeIntervalSince(lastAppleScriptMuteRead) >= 3 else { return }
         lastAppleScriptMuteRead = Date()
 
+        if let muted = readMuteStateViaAppleScriptNow() {
+            DispatchQueue.main.async { self.isMuted = muted }
+        }
+    }
+
+    private func readMuteStateViaAppleScriptNow() -> Bool? {
         let script = "output muted of (get volume settings)"
         if let appleScript = NSAppleScript(source: script) {
             var error: NSDictionary?
             let result = appleScript.executeAndReturnError(&error)
             if error == nil {
-                let muted = result.booleanValue
-                DispatchQueue.main.async { self.isMuted = muted }
+                return result.booleanValue
             }
         }
+
+        return nil
     }
 
     /// Set volume of the default output device (0.0 - 1.0)
@@ -613,9 +620,11 @@ class AudioManager: ObservableObject {
 
             self.audioQueue.asyncAfter(deadline: .now() + 0.5) {
                 guard self.activeRepairID == repairID else { return }
-                if firstToggleSucceeded, self.isMuted == intermediateMuteState {
-                    _ = self.setMuteViaAppleScriptNow(originalMuteState)
-                }
+                let currentMuteState = self.readMuteStateViaAppleScriptNow()
+                let shouldRestore = firstToggleSucceeded && currentMuteState == intermediateMuteState
+                let restoreSucceeded = shouldRestore
+                    ? self.setMuteViaAppleScriptNow(originalMuteState)
+                    : false
 
                 self.isRepairingMuteCycle = false
                 self.loadVolume()
@@ -625,9 +634,11 @@ class AudioManager: ObservableObject {
                     guard self.activeRepairID == repairID else { return }
                     self.activeRepairID = nil
                     self.isProcessing = false
-                    if firstToggleSucceeded {
+                    if firstToggleSucceeded && restoreSucceeded {
                         self.lastRepairDate = Date()
                         self.repairState = .idle
+                    } else if firstToggleSucceeded {
+                        self.repairState = .failed("Mute toggle could not restore the original state. Try Deep Fix for this output device.")
                     } else {
                         self.repairState = .failed("System mute toggle failed. Try Deep Fix for this output device.")
                     }
