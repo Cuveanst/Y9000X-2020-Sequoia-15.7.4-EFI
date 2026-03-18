@@ -1,6 +1,8 @@
 import Foundation
+import AVFoundation
 import CoreAudio
 import Combine
+import AppKit
 
 /// Represents an audio output device
 struct AudioDevice: Identifiable, Equatable {
@@ -27,6 +29,8 @@ class AudioManager: ObservableObject {
     @Published var currentDeviceID: AudioDeviceID = 0
     @Published var lastRepairDate: Date?
     @Published var repairState: RepairState = .idle
+    @Published var isSilentKeepAliveEnabled: Bool = false
+    @Published var keepAliveStatus: String = "Hardware keepalive is off."
 
     private var deviceListListenerBlock: AudioObjectPropertyListenerBlock?
     private var defaultDeviceListenerBlock: AudioObjectPropertyListenerBlock?
@@ -40,8 +44,15 @@ class AudioManager: ObservableObject {
     private var isUserAdjustingVolume = false
     private var pendingInteractiveVolume: Float?
     private var interactiveVolumeWorkItem: DispatchWorkItem?
+    private let keepAliveEnabledKey = "silentKeepAliveEnabled"
+    private var keepAliveEngine: AVAudioEngine?
+    private var keepAliveSourceNode: AVAudioSourceNode?
+    private var keepAliveObservers: [Any] = []
 
     init() {
+        let keepAliveEnabled = UserDefaults.standard.bool(forKey: keepAliveEnabledKey)
+        self.isSilentKeepAliveEnabled = keepAliveEnabled
+
         audioQueue.async {
             self.refreshOutputDevices()
             self.loadCurrentDevice()
@@ -50,6 +61,14 @@ class AudioManager: ObservableObject {
             self.installDefaultDeviceListener()
             self.installVolumeListener()
         }
+
+        if keepAliveEnabled {
+            DispatchQueue.main.async {
+                self.startSilentKeepAlive()
+            }
+        }
+
+        installKeepAliveObservers()
     }
 
     deinit {
@@ -59,6 +78,115 @@ class AudioManager: ObservableObject {
             removeVolumeListener()
             stopVolumePolling()
         }
+        stopSilentKeepAlive()
+        removeKeepAliveObservers()
+    }
+
+    func setSilentKeepAliveEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: keepAliveEnabledKey)
+        DispatchQueue.main.async {
+            self.isSilentKeepAliveEnabled = enabled
+            if enabled {
+                self.startSilentKeepAlive()
+            } else {
+                self.stopSilentKeepAlive()
+            }
+        }
+    }
+
+    private func startSilentKeepAlive() {
+        if keepAliveEngine?.isRunning == true {
+            keepAliveStatus = "Hardware keepalive is running."
+            return
+        }
+
+        let engine = AVAudioEngine()
+        let format = engine.outputNode.outputFormat(forBus: 0)
+        var noiseState: UInt32 = 0x12345678
+        let sourceNode = AVAudioSourceNode { _, _, frameCount, audioBufferList -> OSStatus in
+            let buffers = UnsafeMutableAudioBufferListPointer(audioBufferList)
+            for buffer in buffers {
+                guard let data = buffer.mData else { continue }
+                let sampleCount = Int(frameCount)
+                let channelCount = Int(buffer.mNumberChannels)
+
+                if format.commonFormat == .pcmFormatFloat32 {
+                    let pointer = data.bindMemory(to: Float.self, capacity: sampleCount * channelCount)
+                    for sampleIndex in 0..<(sampleCount * channelCount) {
+                        noiseState = 1664525 &* noiseState &+ 1013904223
+                        let unit = Float(noiseState & 0xFFFF) / Float(UInt16.max)
+                        pointer[sampleIndex] = (unit * 2 - 1) * 0.00003
+                    }
+                } else {
+                    memset(data, 0, Int(buffer.mDataByteSize))
+                }
+            }
+            return noErr
+        }
+
+        engine.attach(sourceNode)
+        engine.connect(sourceNode, to: engine.mainMixerNode, format: format)
+        do {
+            try engine.start()
+            keepAliveEngine = engine
+            keepAliveSourceNode = sourceNode
+            keepAliveStatus = "Hardware keepalive is running with an inaudible low-level signal."
+        } catch {
+            keepAliveEngine = nil
+            keepAliveSourceNode = nil
+            isSilentKeepAliveEnabled = false
+            UserDefaults.standard.set(false, forKey: keepAliveEnabledKey)
+            keepAliveStatus = "Hardware keepalive could not start: \(error.localizedDescription)"
+        }
+    }
+
+    private func stopSilentKeepAlive() {
+        keepAliveEngine?.stop()
+        if let node = keepAliveSourceNode {
+            keepAliveEngine?.detach(node)
+        }
+        keepAliveSourceNode = nil
+        keepAliveEngine = nil
+        keepAliveStatus = "Hardware keepalive is off."
+    }
+
+    private func restartSilentKeepAlive(reason: String) {
+        guard isSilentKeepAliveEnabled else { return }
+        DispatchQueue.main.async {
+            self.keepAliveStatus = "Restarting hardware keepalive after \(reason)..."
+            self.stopSilentKeepAlive()
+            self.startSilentKeepAlive()
+        }
+    }
+
+    private func installKeepAliveObservers() {
+        let center = NotificationCenter.default
+
+        keepAliveObservers.append(
+            center.addObserver(
+                forName: NSWorkspace.didWakeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.restartSilentKeepAlive(reason: "wake")
+            }
+        )
+
+        keepAliveObservers.append(
+            center.addObserver(
+                forName: .AVAudioEngineConfigurationChange,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.restartSilentKeepAlive(reason: "audio configuration changes")
+            }
+        )
+    }
+
+    private func removeKeepAliveObservers() {
+        let center = NotificationCenter.default
+        keepAliveObservers.forEach { center.removeObserver($0) }
+        keepAliveObservers.removeAll()
     }
 
     // MARK: - Volume Control
@@ -423,6 +551,7 @@ class AudioManager: ObservableObject {
         removeVolumeListener()
         installVolumeListener()
         loadVolume()
+        restartSilentKeepAlive(reason: "output device changes")
     }
 
     /// Listen for volume changes on the current default device

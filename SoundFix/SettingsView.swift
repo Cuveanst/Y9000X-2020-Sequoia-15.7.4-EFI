@@ -60,6 +60,23 @@ struct SettingsView: View {
                     .padding(8)
                 }
 
+                GroupBox("Hardware Keepalive") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Toggle("Keep a near-silent audio stream running in the background", isOn: silentKeepAliveBinding)
+
+                        Text(audioManager.keepAliveStatus)
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Text("This keeps feeding a near-inaudible low-level signal to the output path, which can help stop the Y9000X codec from idling out after video playback ends.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(8)
+                }
+
                 GroupBox("Offline ALCPlugFix") {
                     VStack(alignment: .leading, spacing: 12) {
                         LabeledContent("Installed", value: offlineRepairManager.isInstalled ? "Yes" : "No")
@@ -215,6 +232,13 @@ struct SettingsView: View {
         Binding(
             get: { loginLaunchManager.runStartupRepair },
             set: { loginLaunchManager.setRunStartupRepair($0) }
+        )
+    }
+
+    private var silentKeepAliveBinding: Binding<Bool> {
+        Binding(
+            get: { audioManager.isSilentKeepAliveEnabled },
+            set: { audioManager.setSilentKeepAliveEnabled($0) }
         )
     }
 }
