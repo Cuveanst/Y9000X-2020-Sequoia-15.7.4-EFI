@@ -368,6 +368,8 @@ class CapsuleSliderView: NSView {
     var onToggleMute: (() -> Void)?
 
     private var isDragging = false
+    private var isScrollInteracting = false
+    private var scrollEndWorkItem: DispatchWorkItem?
     private let sliderHeight: CGFloat = 28
     private let iconAreaWidth: CGFloat = 34
 
@@ -482,15 +484,20 @@ class CapsuleSliderView: NSView {
     }
 
     override func scrollWheel(with event: NSEvent) {
-        onInteractionChanged?(true)
-        let delta = event.deltaY * -0.01 + event.deltaX * 0.01
-        let newVol = max(0, min(1, volume + CGFloat(delta)))
-        volume = newVol
-        onVolumeChange?(newVol)
-        needsDisplay = true
-        DispatchQueue.main.async { [weak self] in
-            self?.onInteractionChanged?(false)
+        beginScrollInteractionIfNeeded()
+
+        let rawDelta = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.deltaY
+        let step: CGFloat = event.hasPreciseScrollingDeltas ? 0.004 : 0.035
+        let delta = CGFloat(rawDelta) * step
+        let newVol = max(0, min(1, volume + delta))
+
+        if abs(newVol - volume) > 0.0001 {
+            volume = newVol
+            onVolumeChange?(newVol)
+            needsDisplay = true
         }
+
+        scheduleScrollInteractionEnd()
     }
 
     private func updateVolume(from event: NSEvent) {
@@ -514,8 +521,29 @@ class CapsuleSliderView: NSView {
     }
 
     func applyExternalVolume(_ newVolume: CGFloat) {
-        guard !isDragging else { return }
+        guard !isDragging, !isScrollInteracting else { return }
         volume = newVolume
+    }
+
+    private func beginScrollInteractionIfNeeded() {
+        scrollEndWorkItem?.cancel()
+        if !isScrollInteracting {
+            isScrollInteracting = true
+            onInteractionChanged?(true)
+        }
+    }
+
+    private func scheduleScrollInteractionEnd() {
+        scrollEndWorkItem?.cancel()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.isScrollInteracting = false
+            self.onInteractionChanged?(false)
+        }
+
+        scrollEndWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: workItem)
     }
 }
 
